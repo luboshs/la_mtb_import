@@ -1,0 +1,8 @@
+# Prevent direct access to PHP files in this module
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^.*\.php$ - [F,L]
+</IfModule>
+
+# Disable directory browsing
+Options -Indexes
