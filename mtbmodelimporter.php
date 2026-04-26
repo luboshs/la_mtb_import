@@ -23,6 +23,13 @@ require_once __DIR__ . '/src/Service/OpenAiTranslator.php';
 require_once __DIR__ . '/src/Service/PublicCatalogScraper.php';
 require_once __DIR__ . '/src/Service/ProductImportService.php';
 require_once __DIR__ . '/src/Service/ImageImportService.php';
+require_once __DIR__ . '/src/Service/OscCsvReader.php';
+require_once __DIR__ . '/src/Service/OscStagingImporter.php';
+require_once __DIR__ . '/src/Service/OscManufacturerMapper.php';
+require_once __DIR__ . '/src/Service/OscCategoryMapper.php';
+require_once __DIR__ . '/src/Service/OscProductImporter.php';
+require_once __DIR__ . '/src/Service/OscSpecialsImporter.php';
+require_once __DIR__ . '/src/Service/OscRedirectManager.php';
 
 class MtbModelImporter extends Module
 {
@@ -31,9 +38,24 @@ class MtbModelImporter extends Module
     const CONFIG_CRON_TOKEN = 'MTB_CRON_TOKEN';
     const CONFIG_TRANSLATION_ENABLED = 'MTB_TRANSLATION_ENABLED';
 
+    // osCommerce import configuration
+    const CONFIG_OSC_BASE_IMAGE_URL = 'MTB_OSC_BASE_IMAGE_URL';
+    const CONFIG_OSC_FALLBACK_CATEGORY = 'MTB_OSC_FALLBACK_CATEGORY';
+    const CONFIG_OSC_BATCH_SIZE = 'MTB_OSC_BATCH_SIZE';
+    const CONFIG_OSC_TAX_MAP_23 = 'MTB_OSC_TAX_MAP_23';
+    const CONFIG_OSC_TAX_MAP_5 = 'MTB_OSC_TAX_MAP_5';
+
     const TABLE_PRODUCT = 'mtb_import_product';
     const TABLE_PRODUCT_LANG = 'mtb_import_product_lang';
     const TABLE_LOG = 'mtb_import_log';
+
+    // osCommerce staging / mapping tables
+    const TABLE_OSC_PRODUCT = 'mtb_osc_product';
+    const TABLE_OSC_SPECIALS = 'mtb_osc_specials';
+    const TABLE_OSC_CATEGORY_MAP = 'mtb_osc_category_map';
+    const TABLE_OSC_MANUFACTURER_MAP = 'mtb_osc_manufacturer_map';
+    const TABLE_OSC_PRODUCT_MAP = 'mtb_osc_product_map';
+    const TABLE_OSC_REDIRECT = 'mtb_osc_redirect';
 
     const STATUS_NEW = 'new';
     const STATUS_CHANGED = 'changed';
@@ -51,10 +73,10 @@ class MtbModelImporter extends Module
     {
         $this->name = 'mtbmodelimporter';
         $this->tab = 'administration';
-        $this->version = '1.0.0';
+        $this->version = '2.0.0';
         $this->author = 'luboshs';
         $this->need_instance = 0;
-        $this->ps_versions_compliancy = ['min' => '8.0.0', 'max' => '8.9.99'];
+        $this->ps_versions_compliancy = ['min' => '8.2.0', 'max' => '8.9.99'];
         $this->bootstrap = true;
 
         parent::__construct();
@@ -138,6 +160,34 @@ class MtbModelImporter extends Module
                 'wording' => 'Log',
                 'wording_domain' => 'Modules.Mtbmodelimporter.Admin',
             ],
+            [
+                'class_name' => 'AdminMtbOscImport',
+                'name' => 'OSC Import',
+                'parent' => 'AdminMtbImportDashboard',
+                'wording' => 'OSC Import',
+                'wording_domain' => 'Modules.Mtbmodelimporter.Admin',
+            ],
+            [
+                'class_name' => 'AdminMtbOscCategoryMap',
+                'name' => 'Category Map',
+                'parent' => 'AdminMtbOscImport',
+                'wording' => 'Category Map',
+                'wording_domain' => 'Modules.Mtbmodelimporter.Admin',
+            ],
+            [
+                'class_name' => 'AdminMtbOscManufacturerMap',
+                'name' => 'Brand Map',
+                'parent' => 'AdminMtbOscImport',
+                'wording' => 'Brand Map',
+                'wording_domain' => 'Modules.Mtbmodelimporter.Admin',
+            ],
+            [
+                'class_name' => 'AdminMtbOscRedirect',
+                'name' => 'Redirects',
+                'parent' => 'AdminMtbOscImport',
+                'wording' => 'Redirects',
+                'wording_domain' => 'Modules.Mtbmodelimporter.Admin',
+            ],
         ];
 
         foreach ($tabs as $tabData) {
@@ -168,6 +218,10 @@ class MtbModelImporter extends Module
     protected function uninstallTabs()
     {
         $tabClassNames = [
+            'AdminMtbOscRedirect',
+            'AdminMtbOscManufacturerMap',
+            'AdminMtbOscCategoryMap',
+            'AdminMtbOscImport',
             'AdminMtbImportLog',
             'AdminMtbImportSettings',
             'AdminMtbImportProducts',
@@ -247,6 +301,86 @@ class MtbModelImporter extends Module
                 KEY `idx_level` (`level`),
                 KEY `idx_created_at` (`created_at`)
             ) ENGINE={$engine} DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+            "CREATE TABLE IF NOT EXISTS `{$prefix}mtb_osc_product` (
+                `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+                `osc_products_id` int(10) unsigned NOT NULL,
+                `products_model` varchar(64) DEFAULT NULL,
+                `manufacturers_name` varchar(255) DEFAULT NULL,
+                `products_name` varchar(255) NOT NULL DEFAULT '',
+                `products_description` text DEFAULT NULL,
+                `products_price` decimal(20,6) DEFAULT NULL,
+                `products_tax_class_id` int(10) unsigned DEFAULT NULL,
+                `products_image` varchar(255) DEFAULT NULL,
+                `products_date_available` date DEFAULT NULL,
+                `categories_ids` varchar(255) DEFAULT NULL,
+                `availability` varchar(100) DEFAULT NULL,
+                `is_new` tinyint(1) NOT NULL DEFAULT 0,
+                `is_optimum` tinyint(1) NOT NULL DEFAULT 0,
+                `subimage1` varchar(255) DEFAULT NULL,
+                `subimage2` varchar(255) DEFAULT NULL,
+                `subimage3` varchar(255) DEFAULT NULL,
+                `subimage4` varchar(255) DEFAULT NULL,
+                `subimage5` varchar(255) DEFAULT NULL,
+                `subimage6` varchar(255) DEFAULT NULL,
+                `import_status` enum('pending','imported','skipped') NOT NULL DEFAULT 'pending',
+                `created_at` datetime NOT NULL,
+                `updated_at` datetime NOT NULL,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uk_osc_products_id` (`osc_products_id`)
+            ) ENGINE={$engine} DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+            "CREATE TABLE IF NOT EXISTS `{$prefix}mtb_osc_specials` (
+                `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+                `osc_specials_id` int(10) unsigned NOT NULL,
+                `osc_products_id` int(10) unsigned NOT NULL,
+                `specials_new_products_price` decimal(20,6) DEFAULT NULL,
+                `specials_date_added` date DEFAULT NULL,
+                `expires_date` date DEFAULT NULL,
+                `import_status` enum('pending','imported','skipped') NOT NULL DEFAULT 'pending',
+                `created_at` datetime NOT NULL,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uk_osc_specials_id` (`osc_specials_id`),
+                KEY `idx_osc_products_id` (`osc_products_id`)
+            ) ENGINE={$engine} DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+            "CREATE TABLE IF NOT EXISTS `{$prefix}mtb_osc_category_map` (
+                `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+                `osc_categories_id` int(10) unsigned NOT NULL,
+                `osc_category_name` varchar(255) NOT NULL DEFAULT '',
+                `ps_id_category` int(10) unsigned DEFAULT NULL,
+                `ignore_binding` tinyint(1) NOT NULL DEFAULT 0,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uk_osc_categories_id` (`osc_categories_id`)
+            ) ENGINE={$engine} DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+            "CREATE TABLE IF NOT EXISTS `{$prefix}mtb_osc_manufacturer_map` (
+                `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+                `osc_manufacturers_name` varchar(255) NOT NULL,
+                `ps_id_manufacturer` int(10) unsigned DEFAULT NULL,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uk_osc_manufacturers_name` (`osc_manufacturers_name`(191))
+            ) ENGINE={$engine} DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+            "CREATE TABLE IF NOT EXISTS `{$prefix}mtb_osc_product_map` (
+                `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+                `osc_products_id` int(10) unsigned NOT NULL,
+                `ps_id_product` int(10) unsigned NOT NULL,
+                `created_at` datetime NOT NULL,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uk_osc_products_id` (`osc_products_id`)
+            ) ENGINE={$engine} DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+
+            "CREATE TABLE IF NOT EXISTS `{$prefix}mtb_osc_redirect` (
+                `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+                `type` enum('product','category') NOT NULL,
+                `osc_id` int(10) unsigned NOT NULL,
+                `osc_url` varchar(255) NOT NULL DEFAULT '',
+                `ps_url` varchar(255) NOT NULL DEFAULT '',
+                `created_at` datetime NOT NULL,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uk_type_osc_id` (`type`, `osc_id`)
+            ) ENGINE={$engine} DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         ];
 
         foreach ($queries as $query) {
@@ -266,6 +400,12 @@ class MtbModelImporter extends Module
         $prefix = _DB_PREFIX_;
 
         $queries = [
+            "DROP TABLE IF EXISTS `{$prefix}mtb_osc_redirect`",
+            "DROP TABLE IF EXISTS `{$prefix}mtb_osc_product_map`",
+            "DROP TABLE IF EXISTS `{$prefix}mtb_osc_manufacturer_map`",
+            "DROP TABLE IF EXISTS `{$prefix}mtb_osc_category_map`",
+            "DROP TABLE IF EXISTS `{$prefix}mtb_osc_specials`",
+            "DROP TABLE IF EXISTS `{$prefix}mtb_osc_product`",
             "DROP TABLE IF EXISTS `{$prefix}mtb_import_product_lang`",
             "DROP TABLE IF EXISTS `{$prefix}mtb_import_log`",
             "DROP TABLE IF EXISTS `{$prefix}mtb_import_product`",
@@ -288,7 +428,12 @@ class MtbModelImporter extends Module
         return Configuration::updateValue(self::CONFIG_OPENAI_API_KEY, '')
             && Configuration::updateValue(self::CONFIG_OPENAI_MODEL, 'gpt-4.1-mini')
             && Configuration::updateValue(self::CONFIG_CRON_TOKEN, $this->generateCronToken())
-            && Configuration::updateValue(self::CONFIG_TRANSLATION_ENABLED, 0);
+            && Configuration::updateValue(self::CONFIG_TRANSLATION_ENABLED, 0)
+            && Configuration::updateValue(self::CONFIG_OSC_BASE_IMAGE_URL, '')
+            && Configuration::updateValue(self::CONFIG_OSC_FALLBACK_CATEGORY, 0)
+            && Configuration::updateValue(self::CONFIG_OSC_BATCH_SIZE, 50)
+            && Configuration::updateValue(self::CONFIG_OSC_TAX_MAP_23, '')
+            && Configuration::updateValue(self::CONFIG_OSC_TAX_MAP_5, '');
     }
 
     /**
@@ -299,7 +444,12 @@ class MtbModelImporter extends Module
         return Configuration::deleteByName(self::CONFIG_OPENAI_API_KEY)
             && Configuration::deleteByName(self::CONFIG_OPENAI_MODEL)
             && Configuration::deleteByName(self::CONFIG_CRON_TOKEN)
-            && Configuration::deleteByName(self::CONFIG_TRANSLATION_ENABLED);
+            && Configuration::deleteByName(self::CONFIG_TRANSLATION_ENABLED)
+            && Configuration::deleteByName(self::CONFIG_OSC_BASE_IMAGE_URL)
+            && Configuration::deleteByName(self::CONFIG_OSC_FALLBACK_CATEGORY)
+            && Configuration::deleteByName(self::CONFIG_OSC_BATCH_SIZE)
+            && Configuration::deleteByName(self::CONFIG_OSC_TAX_MAP_23)
+            && Configuration::deleteByName(self::CONFIG_OSC_TAX_MAP_5);
     }
 
     /**
@@ -322,6 +472,10 @@ class MtbModelImporter extends Module
             || $this->context->controller->controller_name === 'AdminMtbImportProducts'
             || $this->context->controller->controller_name === 'AdminMtbImportSettings'
             || $this->context->controller->controller_name === 'AdminMtbImportLog'
+            || $this->context->controller->controller_name === 'AdminMtbOscImport'
+            || $this->context->controller->controller_name === 'AdminMtbOscCategoryMap'
+            || $this->context->controller->controller_name === 'AdminMtbOscManufacturerMap'
+            || $this->context->controller->controller_name === 'AdminMtbOscRedirect'
         ) {
             $this->context->controller->addJS(
                 $this->_path . 'views/js/mtbmodelimporter.js'

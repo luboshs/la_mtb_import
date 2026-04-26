@@ -2,16 +2,18 @@
 
 ## Overview
 
-**mtbmodelimporter** is a PrestaShop 8.1 module designed to streamline the process of importing
-railway model products from the MTB Model public catalog and dealer price lists. The module follows
-a manual-approval workflow: no product is ever automatically imported into the shop without explicit
-admin confirmation.
+**mtbmodelimporter** is a PrestaShop 8.2+ module with two main functions:
+
+1. **MTB Model catalog import** – import railway model products from the public MTB Model catalog
+   and dealer price lists (manual approval workflow).
+2. **osCommerce migration** – import products, specials, categories and manufacturers from an
+   osCommerce shop export (CSV-based, no direct DB access to the old shop).
 
 ---
 
 ## Prerequisites
 
-- PrestaShop **8.0.0 – 8.9.99**
+- PrestaShop **8.2.0 – 8.9.99**
 - PHP **8.1+**
 - cURL extension enabled
 - DOM extension enabled (for HTML parsing)
@@ -209,8 +211,146 @@ Run integration tests (requires module files only, no live PrestaShop):
 
 Go to **Back Office → Modules → Module Manager**, find **MTB Model Importer** and click **Uninstall**.
 
-> **Warning:** Uninstalling the module will drop the `mtb_import_product`, `mtb_import_product_lang`,
-> and `mtb_import_log` database tables. Back up your data before uninstalling.
+> **Warning:** Uninstalling the module will drop all module database tables including the OSC
+> staging and mapping tables. Back up your data before uninstalling.
+
+---
+
+## osCommerce Migration
+
+### Overview
+
+The OSC import subsystem migrates products from an osCommerce shop to PrestaShop **without** a
+direct database connection to the old shop.  All data is provided via CSV exports.
+
+**Key rules enforced:**
+- Only **active products** (`products_status = 1`) are staged.
+- Only **active specials** (`status = 1`) are staged.
+- **Prices are stored without VAT** (`products_price` is the osC net price).
+- `products_id` from osCommerce is **never** used as the PS `id_product`; the old ID is stored
+  only in the `mtb_osc_product_map` mapping table.
+- Products are **not duplicated**: if `osc_products_id` already exists in the map table, the
+  record is skipped.
+- A product can be placed in **multiple PS categories** (resolved from pipe-separated
+  `categories_ids` in the CSV).
+- Each osC category is mapped **individually** in the Category Map screen.
+- Categories with **ignore_binding = 1** are excluded from the mapping.
+- Products whose all osC categories are unmapped or ignored are placed in the **fallback category**.
+- The fallback category should be set to `active = 0` (hidden) in PrestaShop;
+  products placed there receive `visibility = 'search'` (searchable, not in nav).
+- **Stock is not imported** (quantity = 0).
+- `availability`, `is_new`, `is_optimum` are staged in `mtb_osc_product` but not pushed to PS
+  (reserved for future development).
+- osC **specials** are imported as PS **SpecificPrice** with `reduction_type = amount`.
+- **Product and category redirects** are recorded in `mtb_osc_redirect` after import.
+
+---
+
+### CSV Export Format
+
+#### products.csv
+
+| Column | Required | Description |
+|---|---|---|
+| `products_id` | ✓ | osCommerce products_id |
+| `products_name` | ✓ | Product name |
+| `products_price` | ✓ | Net price (without VAT) |
+| `products_status` | ✓ | 1 = active, 0 = inactive |
+| `products_model` | | SKU / model number |
+| `manufacturers_name` | | Manufacturer name |
+| `products_description` | | HTML description |
+| `products_tax_class_id` | | osC tax class ID |
+| `products_image` | | Main image filename |
+| `products_date_available` | | Date available |
+| `categories_ids` | | Pipe-separated osC category IDs (e.g. `12\|34`) |
+| `availability` | | Availability status (stored only) |
+| `is_new` | | New flag 0/1 (stored only) |
+| `is_optimum` | | Optimum flag 0/1 (stored only) |
+| `subimage1` – `subimage6` | | Additional image filenames |
+
+#### specials.csv
+
+| Column | Required | Description |
+|---|---|---|
+| `specials_id` | ✓ | osCommerce specials_id |
+| `products_id` | ✓ | osCommerce products_id |
+| `specials_new_products_price` | ✓ | Discounted net price |
+| `status` | ✓ | 1 = active |
+| `specials_date_added` | | Date added |
+| `expires_date` | | Expiry date |
+
+#### categories.csv
+
+| Column | Required | Description |
+|---|---|---|
+| `categories_id` | ✓ | osCommerce categories_id |
+| `categories_name` | ✓ | Category name |
+| `parent_id` | | Parent category ID |
+
+---
+
+### OSC Migration Workflow
+
+1. **Configure OSC settings** (`OSC Import → Settings`):
+   - Set *Base Image URL* (root URL of old shop image directory).
+   - Set *Fallback Category ID* (hidden PS category for unmapped products).
+   - Set *Batch Size* (products per batch run, default 50).
+   - Set *Tax Class IDs → 23 %* and *Tax Class IDs → 5 %* (comma-separated osC tax_class_id values).
+
+2. **Upload Categories CSV** (`OSC Import → Upload Categories CSV`):
+   - Populates the Category Map table with osC category names.
+
+3. **Map categories** (`OSC Import → Category Map`):
+   - For each osC category, select the target PS category.
+   - Or check *Ignore Binding* to skip that category.
+
+4. **Upload Products CSV** (`OSC Import → Upload Products CSV`):
+   - Stages active products into `mtb_osc_product`.
+   - Also registers discovered manufacturer names and category IDs.
+
+5. **Map manufacturers** (`OSC Import → Brand Map`):
+   - Select an existing PS manufacturer for each osC manufacturer name.
+   - Leave unmapped to auto-create a new PS manufacturer from the name.
+
+6. **Run Batch Import** (`OSC Import → Run Batch Import`):
+   - Processes the next *Batch Size* pending products.
+   - Repeat until all products show `imported` or `skipped` status.
+
+7. **Upload Specials CSV** (`OSC Import → Upload Specials CSV`):
+   - Stages active specials.
+
+8. **Run Specials Batch** (`OSC Import → Run Specials Batch`):
+   - Imports staged specials as PS SpecificPrice records.
+
+9. **View Redirects** (`OSC Import → Redirects`):
+   - Review product and category redirect records for use in `.htaccess`.
+
+---
+
+### OSC Database Tables
+
+| Table | Description |
+|---|---|
+| `mtb_osc_product` | Staged osC products (CSV import staging) |
+| `mtb_osc_specials` | Staged osC specials (CSV import staging) |
+| `mtb_osc_category_map` | osC categories_id → PS id_category mapping |
+| `mtb_osc_manufacturer_map` | osC manufacturers_name → PS id_manufacturer mapping |
+| `mtb_osc_product_map` | osc_products_id → PS id_product mapping (old IDs stored here only) |
+| `mtb_osc_redirect` | Product and category redirect records (osc URL → PS URL) |
+
+---
+
+### OSC Services
+
+| Class | File | Description |
+|---|---|---|
+| `MtbOscCsvReader` | `src/Service/OscCsvReader.php` | Reads/validates osC CSV exports |
+| `MtbOscStagingImporter` | `src/Service/OscStagingImporter.php` | Loads CSV into staging tables |
+| `MtbOscManufacturerMapper` | `src/Service/OscManufacturerMapper.php` | Matches/creates PS manufacturers by name |
+| `MtbOscCategoryMapper` | `src/Service/OscCategoryMapper.php` | Resolves osC category IDs to PS category IDs |
+| `MtbOscProductImporter` | `src/Service/OscProductImporter.php` | Imports staged products to PS (batch) |
+| `MtbOscSpecialsImporter` | `src/Service/OscSpecialsImporter.php` | Imports specials as SpecificPrice (batch) |
+| `MtbOscRedirectManager` | `src/Service/OscRedirectManager.php` | Manages redirect records |
 
 ---
 
